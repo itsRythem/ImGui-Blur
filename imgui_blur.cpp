@@ -397,16 +397,15 @@ static void post_process_callback(const ImDrawList*, const ImDrawCmd* cmd) {
 }
 
 void blur::process(ImDrawList* draw_list, int iterations, float offset, float noise) {
-    BlurParameters* blur_parameters = IM_NEW(BlurParameters);
-    blur_parameters->iterations = iterations;
-    blur_parameters->offset = offset;
-    blur_parameters->noise = noise;
-
-    draw_list->AddCallback(post_process_callback, blur_parameters);
+    BlurParameters params = { iterations, offset, noise };
+    draw_list->AddCallback(post_process_callback, IM_NEW(BlurParameters(params)));
     draw_list->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
-    draw_list->AddCallback([](const ImDrawList*, const ImDrawCmd* cmd) {
-        IM_DELETE((BlurParameters*)cmd->UserCallbackData);
-        }, blur_parameters);
+    draw_list->AddCallback(
+        [](const ImDrawList*, const ImDrawCmd* cmd) {
+            IM_DELETE((BlurParameters*)cmd->UserCallbackData);
+        },
+        nullptr
+    );
 }
 
 void blur::render(ImDrawList* draw_list, const ImVec2 min, const ImVec2 max, ImU32 col, float rounding, ImDrawFlags draw_flags) {
