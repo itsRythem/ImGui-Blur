@@ -6,10 +6,6 @@
 
 #include <cstdint>
 
-static int g_constant_iterations = 4;
-static float g_constant_offset = 2.0f;
-static float g_constant_noise = 0.05f;
-
 static const char* g_vertex_src = R"(
 struct VS_INPUT {
     float2 pos : POSITION;
@@ -100,6 +96,13 @@ public:
 class BlurConstants {
 public:
     ImVec2 half_pixel;
+    float offset;
+    float noise;
+};
+
+class BlurParameters {
+public:
+    int iterations;
     float offset;
     float noise;
 };
@@ -306,6 +309,10 @@ static bool create_framebuffer(ID3D11Device* device, Framebuffer& framebuffer, i
 }
 
 static void post_process_callback(const ImDrawList*, const ImDrawCmd* cmd) {
+    BlurParameters* blur_parameters = reinterpret_cast<BlurParameters*>(cmd->UserCallbackData);
+    if (!blur_parameters)
+        return;
+
     ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
     ImGui_ImplDX11_RenderState* render_state = (ImGui_ImplDX11_RenderState*)platform_io.Renderer_RenderState;
     ID3D11Device* device = render_state->Device;
@@ -322,12 +329,12 @@ static void post_process_callback(const ImDrawList*, const ImDrawCmd* cmd) {
 
     const int width = tex_desc.Width;
     const int height = tex_desc.Height;
-    if (g_last_iterations != g_constant_iterations || g_last_width != width || g_last_height != height) {
+    if (g_last_iterations != blur_parameters->iterations || g_last_width != width || g_last_height != height) {
         g_framebuffers.clear_destruct();
-        g_framebuffers.resize(g_constant_iterations + 1);
+        g_framebuffers.resize(blur_parameters->iterations + 1);
 
         create_framebuffer(device, g_framebuffers[0], width, height);
-        for (int i = 1; i <= g_constant_iterations; ++i) {
+        for (int i = 1; i <= blur_parameters->iterations; ++i) {
             create_framebuffer(
                 device, g_framebuffers[i],
                 width / (1 << i),
@@ -335,7 +342,7 @@ static void post_process_callback(const ImDrawList*, const ImDrawCmd* cmd) {
             );
         }
 
-        g_last_iterations = g_constant_iterations;
+        g_last_iterations = blur_parameters->iterations;
         g_last_width = width;
         g_last_height = height;
     }
@@ -371,15 +378,15 @@ static void post_process_callback(const ImDrawList*, const ImDrawCmd* cmd) {
     device_context->RSSetState(g_rasterizer_state);
     device_context->OMSetDepthStencilState(g_depth_stencil_state, 0);
 
-    render_shader_pass(device_context, g_framebuffers[1], screen_srv, g_downsample, g_constant_offset, g_constant_noise);
+    render_shader_pass(device_context, g_framebuffers[1], screen_srv, g_downsample, blur_parameters->offset, blur_parameters->noise);
     
-    for (int i = 1; i < g_constant_iterations; ++i)
-        render_shader_pass(device_context, g_framebuffers[i + 1], g_framebuffers[i].srv, g_downsample, g_constant_offset, g_constant_noise);
+    for (int i = 1; i < blur_parameters->iterations; ++i)
+        render_shader_pass(device_context, g_framebuffers[i + 1], g_framebuffers[i].srv, g_downsample, blur_parameters->offset, blur_parameters->noise);
 
-    for (int i = g_constant_iterations; i > 1; --i)
-        render_shader_pass(device_context, g_framebuffers[i - 1], g_framebuffers[i].srv, g_upsample, g_constant_offset, g_constant_noise);
+    for (int i = blur_parameters->iterations; i > 1; --i)
+        render_shader_pass(device_context, g_framebuffers[i - 1], g_framebuffers[i].srv, g_upsample, blur_parameters->offset, blur_parameters->noise);
 
-    render_shader_pass(device_context, g_framebuffers[0], g_framebuffers[1].srv, g_upsample, g_constant_offset, g_constant_noise);
+    render_shader_pass(device_context, g_framebuffers[0], g_framebuffers[1].srv, g_upsample, blur_parameters->offset, blur_parameters->noise);
 
     device_context->RSSetViewports(1, &old_viewport);
     device_context->OMSetRenderTargets(1, &old_rtv, old_dsv);
@@ -390,8 +397,16 @@ static void post_process_callback(const ImDrawList*, const ImDrawCmd* cmd) {
 }
 
 void blur::process(ImDrawList* draw_list, int iterations, float offset, float noise) {
-    draw_list->AddCallback(post_process_callback, nullptr);
+    BlurParameters* blur_parameters = IM_NEW(BlurParameters);
+    blur_parameters->iterations = iterations;
+    blur_parameters->offset = offset;
+    blur_parameters->noise = noise;
+
+    draw_list->AddCallback(post_process_callback, blur_parameters);
     draw_list->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+    draw_list->AddCallback([](const ImDrawList*, const ImDrawCmd* cmd) {
+        IM_DELETE((BlurParameters*)cmd->UserCallbackData);
+        }, blur_parameters);
 }
 
 void blur::render(ImDrawList* draw_list, const ImVec2 min, const ImVec2 max, ImU32 col, float rounding, ImDrawFlags draw_flags) {
@@ -406,3 +421,4 @@ void blur::render(ImDrawList* draw_list, const ImVec2 min, const ImVec2 max, ImU
 ImTextureID blur::get_texture() {
     return (ImTextureID)(g_framebuffers.empty() ? nullptr : g_framebuffers[0].srv);
 }
+
