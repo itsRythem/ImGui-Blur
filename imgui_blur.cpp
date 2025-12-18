@@ -4,7 +4,8 @@
 #include <d3dcompiler.h>
 #pragma comment(lib, "d3dcompiler.lib")
 
-#include <cstdint>
+#include <d3d11.h>
+#pragma comment(lib, "d3d11.lib")
 
 static const char* g_vertex_src = R"(
 struct VS_INPUT {
@@ -79,9 +80,23 @@ float4 main(PS_INPUT input) : SV_Target {
 }
 )";
 
+static const char* g_copy_src = R"(
+Texture2D input_texture : register(t0);
+SamplerState input_sampler : register(s0);
+
+struct PS_INPUT {
+    float4 pos : SV_POSITION;
+    float2 uv : TEXCOORD0;
+};
+
+float4 main(PS_INPUT input) : SV_Target {
+    return input_texture.Sample(input_sampler, input.uv);
+}
+)";
+
 class Framebuffer {
 public:
-    ~Framebuffer() {
+    void destroy() {
         if (tex != nullptr) { tex->Release(); tex = nullptr; }
         if (rtv != nullptr) { rtv->Release(); rtv = nullptr; }
         if (srv != nullptr) { srv->Release(); srv = nullptr; }
@@ -105,11 +120,13 @@ public:
     int iterations;
     float offset;
     float noise;
+    float scale;
 };
 
 static ID3D11PixelShader* g_downsample = nullptr;
 static ID3D11PixelShader* g_upsample = nullptr;
 static ID3D11VertexShader* g_vertex = nullptr;
+static ID3D11PixelShader* g_copy = nullptr;
 static ID3D11InputLayout* g_input_layout = nullptr;
 static ID3D11Buffer* g_constant_buffer = nullptr;
 static ID3D11Buffer* g_vertex_buffer = nullptr;
@@ -118,9 +135,33 @@ static ID3D11SamplerState* g_mirror_sampler = nullptr;
 static ID3D11RasterizerState* g_rasterizer_state = nullptr;
 static ID3D11DepthStencilState* g_depth_stencil_state = nullptr;
 static ImVector<Framebuffer> g_framebuffers{};
+static Framebuffer g_framebuffer{};
 static int g_last_iterations = 0;
 static int g_last_width = 0;
 static int g_last_height = 0;
+
+static bool create_framebuffer(ID3D11Device* device, Framebuffer& framebuffer, int width, int height) {
+    D3D11_TEXTURE2D_DESC tex_desc = {};
+    tex_desc.Width = width;
+    tex_desc.Height = height;
+    tex_desc.MipLevels = 1;
+    tex_desc.ArraySize = 1;
+    tex_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    tex_desc.SampleDesc.Count = 1;
+    tex_desc.Usage = D3D11_USAGE_DEFAULT;
+    tex_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+
+    framebuffer.width = width;
+    framebuffer.height = height;
+
+    if (FAILED(device->CreateTexture2D(&tex_desc, nullptr, &framebuffer.tex)))
+        return false;
+
+    if (FAILED(device->CreateRenderTargetView(framebuffer.tex, nullptr, &framebuffer.rtv)))
+        return false;
+
+    return SUCCEEDED(device->CreateShaderResourceView(framebuffer.tex, nullptr, &framebuffer.srv));
+}
 
 bool blur::setup(ID3D11Device* device, ID3D11DeviceContext* device_context) {
     ID3DBlob* shader_blob = nullptr;
@@ -159,6 +200,14 @@ bool blur::setup(ID3D11Device* device, ID3D11DeviceContext* device_context) {
         nullptr, &g_upsample)))
         return false;
 
+    if (FAILED(D3DCompile(g_copy_src, strlen(g_copy_src), nullptr, nullptr, nullptr,
+        "main", "ps_5_0", 0, 0, &shader_blob, &error_blob)))
+        return false;
+
+    if (FAILED(device->CreatePixelShader(shader_blob->GetBufferPointer(), shader_blob->GetBufferSize(),
+        nullptr, &g_copy)))
+        return false;
+
     if (shader_blob) shader_blob->Release();
     if (error_blob) error_blob->Release();
 
@@ -181,7 +230,6 @@ bool blur::setup(ID3D11Device* device, ID3D11DeviceContext* device_context) {
 
     D3D11_SUBRESOURCE_DATA vb_data = {};
     vb_data.pSysMem = vertices;
-
     if (FAILED(device->CreateBuffer(&vb_desc, &vb_data, &g_vertex_buffer)))
         return false;
 
@@ -190,7 +238,6 @@ bool blur::setup(ID3D11Device* device, ID3D11DeviceContext* device_context) {
     cb_desc.ByteWidth = sizeof(BlurConstants);
     cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     cb_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-
     if (FAILED(device->CreateBuffer(&cb_desc, nullptr, &g_constant_buffer)))
         return false;
 
@@ -201,14 +248,12 @@ bool blur::setup(ID3D11Device* device, ID3D11DeviceContext* device_context) {
     sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     sampler_desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
     sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
-
     if (FAILED(device->CreateSamplerState(&sampler_desc, &g_linear_sampler)))
         return false;
 
     sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_MIRROR;
     sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_MIRROR;
     sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_MIRROR;
-
     if (FAILED(device->CreateSamplerState(&sampler_desc, &g_mirror_sampler)))
         return false;
 
@@ -217,20 +262,22 @@ bool blur::setup(ID3D11Device* device, ID3D11DeviceContext* device_context) {
     raster_desc.CullMode = D3D11_CULL_NONE;
     raster_desc.ScissorEnable = FALSE;
     raster_desc.DepthClipEnable = FALSE;
-
     if (FAILED(device->CreateRasterizerState(&raster_desc, &g_rasterizer_state)))
         return false;
 
     D3D11_DEPTH_STENCIL_DESC depth_desc = {};
     depth_desc.DepthEnable = FALSE;
     depth_desc.StencilEnable = FALSE;
-
-    return SUCCEEDED(device->CreateDepthStencilState(&depth_desc, &g_depth_stencil_state));
+    if (FAILED(device->CreateDepthStencilState(&depth_desc, &g_depth_stencil_state)))
+        return false;
+    
+    return create_framebuffer(device, g_framebuffer, 1, 1);
 }
 
 void blur::destroy() {
     if (g_downsample) { g_downsample->Release(); g_downsample = nullptr; }
     if (g_upsample) { g_upsample->Release(); g_upsample = nullptr; }
+    if (g_copy) { g_copy->Release(); g_copy = nullptr; }
     if (g_vertex) { g_vertex->Release(); g_vertex = nullptr; }
     if (g_input_layout) { g_input_layout->Release(); g_input_layout = nullptr; }
     if (g_constant_buffer) { g_constant_buffer->Release(); g_constant_buffer = nullptr; }
@@ -239,7 +286,12 @@ void blur::destroy() {
     if (g_mirror_sampler) { g_mirror_sampler->Release(); g_mirror_sampler = nullptr; }
     if (g_rasterizer_state) { g_rasterizer_state->Release(); g_rasterizer_state = nullptr; }
     if (g_depth_stencil_state) { g_depth_stencil_state->Release(); g_depth_stencil_state = nullptr; }
-    g_framebuffers.clear_destruct();
+
+    for (Framebuffer& framebuffer : g_framebuffers)
+        framebuffer.destroy();
+    g_framebuffers.clear();
+
+    g_framebuffer.destroy();
 }
 
 static void render_fullscreen_quad(ID3D11DeviceContext* device_context) {
@@ -251,12 +303,12 @@ static void render_fullscreen_quad(ID3D11DeviceContext* device_context) {
     device_context->Draw(4, 0);
 }
 
-static void render_shader_pass(ID3D11DeviceContext* device_context, const Framebuffer& framebuffer, ID3D11ShaderResourceView* input_srv, ID3D11PixelShader* shader, float offset, float noise) {
+static void render_shader_pass(ID3D11DeviceContext* device_context, const Framebuffer& framebuffer, ID3D11ShaderResourceView* input_srv, ID3D11PixelShader* shader, float offset, float noise, float scale) {
     D3D11_MAPPED_SUBRESOURCE mapped;
     device_context->Map(g_constant_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
 
     BlurConstants* constants = (BlurConstants*)mapped.pData;
-    constants->half_pixel = ImVec2(1.0f / framebuffer.width, 1.0f / framebuffer.height);
+    constants->half_pixel = ImVec2(scale / framebuffer.width, scale / framebuffer.height);
     constants->offset = offset;
     constants->noise = noise;
 
@@ -285,27 +337,26 @@ static void render_shader_pass(ID3D11DeviceContext* device_context, const Frameb
     device_context->PSSetShaderResources(0, 2, null_srv);
 }
 
-static bool create_framebuffer(ID3D11Device* device, Framebuffer& framebuffer, int width, int height) {
-    D3D11_TEXTURE2D_DESC tex_desc = {};
-    tex_desc.Width = width;
-    tex_desc.Height = height;
-    tex_desc.MipLevels = 1;
-    tex_desc.ArraySize = 1;
-    tex_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    tex_desc.SampleDesc.Count = 1;
-    tex_desc.Usage = D3D11_USAGE_DEFAULT;
-    tex_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    
-    framebuffer.width = width;
-    framebuffer.height = height;
+static void copy_texture(ID3D11DeviceContext* device_context, const Framebuffer& dst, ID3D11ShaderResourceView* src_srv) {
+    float clear_color[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    device_context->ClearRenderTargetView(dst.rtv, clear_color);
+    device_context->OMSetRenderTargets(1, &dst.rtv, nullptr);
 
-    if (FAILED(device->CreateTexture2D(&tex_desc, nullptr, &framebuffer.tex)))
-        return false;
+    D3D11_VIEWPORT viewport = {};
+    viewport.Width = (float)dst.width;
+    viewport.Height = (float)dst.height;
+    viewport.MinDepth = 0.0f;
+    viewport.MaxDepth = 1.0f;
+    device_context->RSSetViewports(1, &viewport);
 
-    if (FAILED(device->CreateRenderTargetView(framebuffer.tex, nullptr, &framebuffer.rtv)))
-        return false;
+    device_context->PSSetShader(g_copy, nullptr, 0);
+    device_context->PSSetShaderResources(0, 1, &src_srv);
+    device_context->PSSetSamplers(0, 1, &g_linear_sampler);
 
-    return SUCCEEDED(device->CreateShaderResourceView(framebuffer.tex, nullptr, &framebuffer.srv));
+    render_fullscreen_quad(device_context);
+
+    ID3D11ShaderResourceView* null_srv[1] = { nullptr };
+    device_context->PSSetShaderResources(0, 1, null_srv);
 }
 
 static void post_process_callback(const ImDrawList*, const ImDrawCmd* cmd) {
@@ -330,7 +381,8 @@ static void post_process_callback(const ImDrawList*, const ImDrawCmd* cmd) {
     const int width = tex_desc.Width;
     const int height = tex_desc.Height;
     if (g_last_iterations != blur_parameters->iterations || g_last_width != width || g_last_height != height) {
-        g_framebuffers.clear_destruct();
+        for (Framebuffer& framebuffer : g_framebuffers)
+            framebuffer.destroy();
         g_framebuffers.resize(blur_parameters->iterations + 1);
 
         create_framebuffer(device, g_framebuffers[0], width, height);
@@ -346,6 +398,9 @@ static void post_process_callback(const ImDrawList*, const ImDrawCmd* cmd) {
         g_last_width = width;
         g_last_height = height;
     }
+
+    if (g_framebuffer.srv == nullptr)
+        create_framebuffer(device, g_framebuffer, width, height);
 
     D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
     srv_desc.Format = tex_desc.Format;
@@ -378,26 +433,32 @@ static void post_process_callback(const ImDrawList*, const ImDrawCmd* cmd) {
     device_context->RSSetState(g_rasterizer_state);
     device_context->OMSetDepthStencilState(g_depth_stencil_state, 0);
 
-    render_shader_pass(device_context, g_framebuffers[1], screen_srv, g_downsample, blur_parameters->offset, blur_parameters->noise);
+    render_shader_pass(device_context, g_framebuffers[1], screen_srv, g_downsample, blur_parameters->offset, blur_parameters->noise, blur_parameters->scale);
     
     for (int i = 1; i < blur_parameters->iterations; ++i)
-        render_shader_pass(device_context, g_framebuffers[i + 1], g_framebuffers[i].srv, g_downsample, blur_parameters->offset, blur_parameters->noise);
+        render_shader_pass(device_context, g_framebuffers[i + 1], g_framebuffers[i].srv, g_downsample, blur_parameters->offset, blur_parameters->noise, blur_parameters->scale);
 
     for (int i = blur_parameters->iterations; i > 1; --i)
-        render_shader_pass(device_context, g_framebuffers[i - 1], g_framebuffers[i].srv, g_upsample, blur_parameters->offset, blur_parameters->noise);
+        render_shader_pass(device_context, g_framebuffers[i - 1], g_framebuffers[i].srv, g_upsample, blur_parameters->offset, blur_parameters->noise, blur_parameters->scale);
 
-    render_shader_pass(device_context, g_framebuffers[0], g_framebuffers[1].srv, g_upsample, blur_parameters->offset, blur_parameters->noise);
+    render_shader_pass(device_context, g_framebuffers[0], g_framebuffers[1].srv, g_upsample, blur_parameters->offset, blur_parameters->noise, blur_parameters->scale);
+
+    copy_texture(device_context, g_framebuffer, g_framebuffers[0].srv);
 
     device_context->RSSetViewports(1, &old_viewport);
     device_context->OMSetRenderTargets(1, &old_rtv, old_dsv);
     device_context->RSSetState(old_rasterizer_state);
     device_context->OMSetDepthStencilState(old_depth_stencil_state, old_stencil_ref);
 
-    screen_srv->Release();
+    if (old_rtv) old_rtv->Release();
+    if (old_dsv) old_dsv->Release();
+    if (old_rasterizer_state) old_rasterizer_state->Release();
+    if (old_depth_stencil_state) old_depth_stencil_state->Release();
+    if (screen_srv) screen_srv->Release();
 }
 
-void blur::process(ImDrawList* draw_list, int iterations, float offset, float noise) {
-    BlurParameters params = { iterations, offset, noise };
+void blur::process(ImDrawList* draw_list, int iterations, float offset, float noise, float scale) {
+    BlurParameters params = { iterations, offset, noise, scale };
     draw_list->AddCallback(post_process_callback, IM_NEW(BlurParameters(params)));
     draw_list->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
     draw_list->AddCallback(
@@ -411,13 +472,19 @@ void blur::process(ImDrawList* draw_list, int iterations, float offset, float no
 void blur::render(ImDrawList* draw_list, const ImVec2 min, const ImVec2 max, ImU32 col, float rounding, ImDrawFlags draw_flags) {
     ImGuiIO& io = ImGui::GetIO();
 
-    draw_list->AddImageRounded(blur::get_texture(), min, max,
+    if (g_framebuffer.width != io.DisplaySize.x || g_framebuffer.height != io.DisplaySize.y)
+        g_framebuffer.destroy();
+
+    if (g_framebuffer.srv == nullptr)
+        return;
+
+    ImTextureID texture_id = blur::get_texture();
+    draw_list->AddImageRounded(texture_id, min, max,
         { min.x / io.DisplaySize.x, min.y / io.DisplaySize.y },
         { max.x / io.DisplaySize.x, max.y / io.DisplaySize.y },
         col, rounding, draw_flags);
 }
 
 ImTextureID blur::get_texture() {
-    return (ImTextureID)(g_framebuffers.empty() ? nullptr : g_framebuffers[0].srv);
+    return (ImTextureID)g_framebuffer.srv;
 }
-
