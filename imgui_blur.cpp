@@ -435,17 +435,17 @@ static void post_process_callback(const ImDrawList*, const ImDrawCmd* cmd) {
     device_context->RSSetState(g_rasterizer_state);
     device_context->OMSetDepthStencilState(g_depth_stencil_state, 0);
 
-    render_shader_pass(device_context, g_framebuffers[1], screen_srv, g_downsample, blur_parameters->offset, blur_parameters->noise, blur_parameters->scale);
+    render_shader_pass(device_context, g_framebuffers[0], screen_srv, g_downsample, blur_parameters->offset, blur_parameters->noise, blur_parameters->scale);
     
-    for (int i = 1; i < blur_parameters->iterations; ++i)
+    for (int i = 0; i < blur_parameters->iterations; ++i)
         render_shader_pass(device_context, g_framebuffers[i + 1], g_framebuffers[i].srv, g_downsample, blur_parameters->offset, blur_parameters->noise, blur_parameters->scale);
 
-    for (int i = blur_parameters->iterations; i > 1; --i)
+    for (int i = blur_parameters->iterations; i > 0; --i)
         render_shader_pass(device_context, g_framebuffers[i - 1], g_framebuffers[i].srv, g_upsample, blur_parameters->offset, blur_parameters->noise, blur_parameters->scale);
 
-    render_shader_pass(device_context, g_framebuffers[0], g_framebuffers[1].srv, g_upsample, blur_parameters->offset, blur_parameters->noise, blur_parameters->scale);
+    render_shader_pass(device_context, g_framebuffer, g_framebuffers[0].srv, g_upsample, blur_parameters->offset, blur_parameters->noise, blur_parameters->scale);
 
-    copy_texture(device_context, g_framebuffer, g_framebuffers[0].srv);
+    //copy_texture(device_context, g_framebuffer, g_framebuffers[0].srv);
 
     device_context->RSSetViewports(1, &old_viewport);
     device_context->OMSetRenderTargets(1, &old_rtv, old_dsv);
@@ -490,3 +490,4 @@ void blur::render(ImDrawList* draw_list, const ImVec2 min, const ImVec2 max, ImU
 ImTextureID blur::get_texture() {
     return (ImTextureID)g_framebuffer.srv;
 }
+
