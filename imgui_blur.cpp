@@ -123,6 +123,7 @@ public:
     float scale;
 };
 
+static ID3D11Device* g_device = nullptr;
 static ID3D11PixelShader* g_downsample = nullptr;
 static ID3D11PixelShader* g_upsample = nullptr;
 static ID3D11VertexShader* g_vertex = nullptr;
@@ -271,6 +272,7 @@ bool blur::setup(ID3D11Device* device, ID3D11DeviceContext* device_context) {
     if (FAILED(device->CreateDepthStencilState(&depth_desc, &g_depth_stencil_state)))
         return false;
     
+    g_device = device;
     return create_framebuffer(device, g_framebuffer, 1, 1);
 }
 
@@ -338,7 +340,7 @@ static void render_shader_pass(ID3D11DeviceContext* device_context, const Frameb
 }
 
 static void copy_texture(ID3D11DeviceContext* device_context, const Framebuffer& dst, ID3D11ShaderResourceView* src_srv) {
-    float clear_color[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    float clear_color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
     device_context->ClearRenderTargetView(dst.rtv, clear_color);
     device_context->OMSetRenderTargets(1, &dst.rtv, nullptr);
 
@@ -362,6 +364,9 @@ static void copy_texture(ID3D11DeviceContext* device_context, const Framebuffer&
 static void post_process_callback(const ImDrawList*, const ImDrawCmd* cmd) {
     BlurParameters* blur_parameters = reinterpret_cast<BlurParameters*>(cmd->UserCallbackData);
     if (!blur_parameters)
+        return;
+
+    if (g_framebuffer.srv == nullptr)
         return;
 
     ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
@@ -398,9 +403,6 @@ static void post_process_callback(const ImDrawList*, const ImDrawCmd* cmd) {
         g_last_width = width;
         g_last_height = height;
     }
-
-    if (g_framebuffer.srv == nullptr)
-        create_framebuffer(device, g_framebuffer, width, height);
 
     D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
     srv_desc.Format = tex_desc.Format;
@@ -458,6 +460,10 @@ static void post_process_callback(const ImDrawList*, const ImDrawCmd* cmd) {
 }
 
 void blur::process(ImDrawList* draw_list, int iterations, float offset, float noise, float scale) {
+    ImGuiIO& io = ImGui::GetIO();
+    if (g_framebuffer.width != io.DisplaySize.x || g_framebuffer.height != io.DisplaySize.y)
+        create_framebuffer(g_device, g_framebuffer, io.DisplaySize.x, io.DisplaySize.y);
+
     BlurParameters params = { iterations, offset, noise, scale };
     draw_list->AddCallback(post_process_callback, IM_NEW(BlurParameters(params)));
     draw_list->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
@@ -471,10 +477,6 @@ void blur::process(ImDrawList* draw_list, int iterations, float offset, float no
 
 void blur::render(ImDrawList* draw_list, const ImVec2 min, const ImVec2 max, ImU32 col, float rounding, ImDrawFlags draw_flags) {
     ImGuiIO& io = ImGui::GetIO();
-
-    if (g_framebuffer.width != io.DisplaySize.x || g_framebuffer.height != io.DisplaySize.y)
-        g_framebuffer.destroy();
-
     if (g_framebuffer.srv == nullptr)
         return;
 
