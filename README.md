@@ -53,16 +53,16 @@ blur::render(draw_list, rect_min_2, rect_max_2, color, rounding, flags);
 #### Performance Considerations
 - **`iterations`**: Changing iteration count requires framebuffer rebuilding - **most expensive**
 - **`offset`**: Relatively inexpensive to modify
-- **`noise`**: (not yet implemented in shader)
+- **`noise`**: (untested, should be inexpensive)
 
 ⚠️ Use `blur::process()` sparingly as it's a costly operation
 
 ## Implementation Notes
 
 ### Noise Support
-Noise functionality is **not yet implemented** in the shader source. 
+A basic frosted glass / grain effect is implemented post tap for quality.
 
-For implementation reference, see the optimized `hash22` noise function:
+For optimization purposes, see the optimized `hash22` noise function:
 - [thi-ng/umbrella noise hash implementation](https://github.com/thi-ng/umbrella/blob/38ecd7cd02564594ab21dbf0d84a44222fd7e4ef/packages/shader-ast-stdlib/src/noise/hash.ts#L113)
 
 ### Alpha Blending
