@@ -44,11 +44,9 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
     sum += input_texture.Sample(input_sampler, uv - float2(half_pixel.x, -half_pixel.y) * offset);
     float4 result = sum / 8.0;
     if (noise > 0.0) {
-        float frost = frac(sin(dot(pos.xy, float2(12.9898, 78.233))) * 43758.5453);
-        float crystal = frac(sin(dot(pos.xy * 0.1, float2(7.898, 4.233))) * 23421.631);
-        float combined = (frost + crystal) * 0.5;
-        float grain = (combined - 0.5) * noise * 0.3;
-        result.rgb = result.rgb + grain;
+        result.rgb += ((frac(sin(dot(pos.xy, float2(12.9898, 78.233))) * 43758.5453) 
+                      + frac(sin(dot(pos.xy * 0.1, float2(7.898, 4.233))) * 23421.631)) * 0.5 - 0.5) 
+                      * noise * 0.3;
     }
     return result;
 }
@@ -75,11 +73,9 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
     sum += input_texture.Sample(input_sampler, uv + float2(-half_pixel.x, -half_pixel.y) * offset) * 2.0;
     float4 result = sum / 12.0;
     if (noise > 0.0) {
-        float frost = frac(sin(dot(pos.xy, float2(12.9898, 78.233))) * 43758.5453);
-        float crystal = frac(sin(dot(pos.xy * 0.1, float2(7.898, 4.233))) * 23421.631);
-        float combined = (frost + crystal) * 0.5;
-        float grain = (combined - 0.5) * noise * 0.3;
-        result.rgb = result.rgb + grain;
+        result.rgb += ((frac(sin(dot(pos.xy, float2(12.9898, 78.233))) * 43758.5453) 
+                      + frac(sin(dot(pos.xy * 0.1, float2(7.898, 4.233))) * 23421.631)) * 0.5 - 0.5) 
+                      * noise * 0.3;
     }
     return result;
 }
@@ -518,3 +514,4 @@ void blur::garbage_collect() {
 ImTextureID blur::get_texture() {
     return (ImTextureID)g_framebuffer.srv;
 }
+
