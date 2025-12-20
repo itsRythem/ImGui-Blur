@@ -13,10 +13,11 @@ A high-performance Gaussian approximation blur shader for ImGui using the Kawase
 ### Basic Workflow
 
 1. **Initialize**: Call `blur::setup()` to initialize the shaders and render state
-2. **Update blur texture**: Call `blur::process()` to generate the blur texture
-3. **Render blur**: Call `blur::render()` to draw the blurred result
-4. **Access texture**: Use `blur::get_texture()` to retrieve the current blur texture
-5. **Release**: Use `blur::destroy()` to free and restore any active memory or states
+2. **Garbage collect**: IMPORTANT! `blur::garbage_collect()` must be called at the beginning of the frame
+3. **Update blur texture**: Call `blur::process()` to generate the blur texture
+4. **Render blur**: Call `blur::render()` to draw the blurred result
+5. **Access texture**: Use `blur::get_texture()` to retrieve the current blur texture
+6. **Release**: Use `blur::destroy()` to free and restore any active memory or states
 ```cpp
 // Initialize the blur
 blur::setup(device, device_context);
